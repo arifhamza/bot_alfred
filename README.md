@@ -1,432 +1,259 @@
-# Daily News Digest Telegram Bot
+# /ognews Telegram News Bot
 
-Sends you a Telegram message every day at 9:00 AM (your timezone) with up
-to 25 of the most relevant news stories, pulled only from 6 sites you
-chose, ranked by how well they match your interests. Costs $0/month to
-run.
+Type `/ognews` to your Telegram bot any time and get the most relevant
+news stories from your 6 chosen sites, ranked and deduplicated. Limited
+to once every 24 hours. No scheduling, no server bills.
 
-This guide assumes no programming experience. Follow it top to bottom.
+This version replaced an earlier scheduled-digest design - see
+[section 6](#6-why-pythonanywhere-instead-of-github-actions) for why an
+on-demand command needs different hosting than a daily cron job.
 
 ---
 
 ## Contents
 
-1. [How it works, in one page](#1-how-it-works-in-one-page)
-2. [Why this architecture](#2-why-this-architecture)
-3. [What's in this project](#3-whats-in-this-project)
-4. [Setup: step by step](#4-setup-step-by-step)
-5. [Entering your Telegram credentials](#5-entering-your-telegram-credentials)
-6. [Setting your timezone](#6-setting-your-timezone)
-7. [Testing before you trust it](#7-testing-before-you-trust-it)
-8. [Adding or removing keywords](#8-adding-or-removing-keywords)
-9. [Adding or removing news sources](#9-adding-or-removing-news-sources)
-10. [How the ranking system works](#10-how-the-ranking-system-works)
-11. [How duplicate detection works](#11-how-duplicate-detection-works)
-12. [How the daily schedule works](#12-how-the-daily-schedule-works)
-13. [Troubleshooting](#13-troubleshooting)
-14. [Known limitations of the free setup](#14-known-limitations-of-the-free-setup)
+1. [How it works](#1-how-it-works)
+2. [What's in this project](#2-whats-in-this-project)
+3. [Setup: step by step](#3-setup-step-by-step)
+4. [Testing](#4-testing)
+5. [Adding/removing keywords and sources](#5-addingremoving-keywords-and-sources)
+6. [Why PythonAnywhere instead of GitHub Actions](#6-why-pythonanywhere-instead-of-github-actions)
+7. [How the ranking and cooldown work](#7-how-the-ranking-and-cooldown-work)
+8. [Updating the code later](#8-updating-the-code-later)
+9. [Troubleshooting](#9-troubleshooting)
+10. [Known limitations](#10-known-limitations)
 
 ---
 
-## 1. How it works, in one page
+## 1. How it works
 
-Once a day, a small Python program:
+1. You type `/ognews` to your bot in Telegram.
+2. Telegram instantly forwards that message to a small always-on web app
+   (`webhook_app.py`) hosted for free on PythonAnywhere.
+3. That app checks: has it been at least 24 hours since you last used
+   `/ognews`? If not, it replies telling you how long to wait, and stops.
+4. If you're clear, it fetches your 6 sites, scores every article against
+   your keywords, drops anything already sent before, removes near-dupes,
+   and sends you up to 25 of the best ones.
+5. It remembers what it sent (in a local file on the PythonAnywhere
+   account) so those same stories never come back.
 
-1. Downloads the article list from each of your 6 sites (using RSS feeds
-   where available, or reading the page directly where it isn't).
-2. Throws out anything you've already been sent before.
-3. Scores each remaining article against your keyword list, weighting
-   specific/high-value keywords more than generic ones, and requiring at
-   least one specific/meaningful keyword match before an article can
-   qualify at all.
-4. Removes near-duplicate stories, keeping the strongest version.
-5. Takes the top 25 (or fewer, if fewer genuinely qualify).
-6. Sends them to your Telegram chat as a clean numbered list.
-7. Remembers what it sent, so tomorrow it won't repeat itself.
+There is no scheduler and no daily automatic send anymore - it only runs
+when you ask it to.
 
-It runs on **GitHub Actions**, a free automation service, on a schedule -
-there is no server for you to keep running, pay for, or maintain.
-
-## 2. Why this architecture
-
-You asked me to choose the technology, prioritizing **reliability, then
-simplicity, then zero cost, then maintainability**. Here's the reasoning:
-
-| Option considered | Verdict |
-|---|---|
-| **GitHub Actions (scheduled workflow)** | **Chosen.** Free and unlimited on public repos, no server to maintain, no "wake up a sleeping app" cold-start problem, built-in secret storage, built-in run logs for troubleshooting, and it can commit its own memory file back to the repo so history survives between runs. |
-| PythonAnywhere free tier | Free tier scheduled tasks are limited (one task/day, fixed to a single time-of-day slot with no timezone control, and the account can be disabled after long inactivity). Less reliable and less flexible than Actions for this use case. |
-| Render.com / Railway free cron | Free tiers on these platforms have changed frequently and often require a credit card or sleep after inactivity. Less predictable long-term than GitHub Actions, which has offered free CI/CD minutes on public repos for years. |
-| AWS Lambda + EventBridge | Genuinely free-tier eligible, but requires an AWS account, IAM permissions, and more moving parts (a bundling/deployment step) than a single Python script - overkill for "don't overengineer." |
-| A repl.it / always-on script on your own machine | Not reliable (depends on your computer being on) and not really "serverless." |
-
-GitHub Actions won on every one of your four priorities at once, which is
-why the rest of this project is built around it.
-
-**Persistent storage** (remembering which articles were already sent)
-uses a plain JSON file committed back into the repository after each
-run - no database needed. This keeps the whole project to "a Python
-script plus one config file plus one small data file," matching your
-"don't overengineer" instruction.
-
-**Scraping vs. RSS**: the bot tries each source's RSS/Atom feed first
-(including auto-discovering one from the page's `<link rel="alternate">`
-tag if you didn't hardcode it), and only falls back to reading the raw
-page when no feed is available. Where I could confirm a source's actual
-page structure, I wrote a scraper matched to that structure rather than
-a one-size-fits-all scraper (see `src/fetchers.py`).
-
-## 3. What's in this project
+## 2. What's in this project
 
 ```
 telegram-news-digest/
-├── .github/workflows/daily-digest.yml   <- the schedule (GitHub Actions)
-├── data/sent_history.json               <- the bot's memory (auto-updated)
+├── webhook_app.py            <- the live bot: listens for /ognews
+├── data/sent_history.json    <- memory: sent URLs + cooldown timestamp
 ├── src/
-│   ├── main.py             <- entry point, orchestrates everything
-│   ├── config.py            <- keywords, sources, all the settings you'll tweak
-│   ├── fetchers.py           <- downloads articles (RSS + scrapers)
-│   ├── scoring.py             <- relevance ranking
-│   ├── dedup.py                <- duplicate detection
-│   ├── telegram_sender.py       <- formats and sends the Telegram message
-│   ├── storage.py                <- reads/writes the memory file
-│   └── logging_setup.py           <- logging configuration
-├── requirements.txt          <- the 3 Python packages it needs
-├── .env.example                <- template for local testing only
-└── README.md                     <- this file
+│   ├── config.py               <- keywords, sources, all settings you'll tweak
+│   ├── digest_builder.py         <- the shared fetch/score/dedup/send pipeline
+│   ├── fetchers.py                 <- downloads articles (RSS + scrapers)
+│   ├── scoring.py                    <- relevance ranking
+│   ├── dedup.py                        <- duplicate detection
+│   ├── telegram_sender.py                <- formats and sends Telegram messages
+│   ├── storage.py                          <- reads/writes the memory file
+│   ├── main.py                               <- optional: manual/local test runner
+│   └── logging_setup.py                        <- logging configuration
+├── requirements.txt          <- the 4 Python packages it needs
+└── README.md
 ```
 
-## 4. Setup: step by step
+## 3. Setup: step by step
 
-### Step A - Create a GitHub account (skip if you have one)
+### A. Get the code into GitHub (skip if you already did this)
 
-Go to [github.com](https://github.com) and sign up. It's free.
+Same as before - create a free GitHub account, create a public repo, and
+upload this folder (Add file → Upload files, dragging the whole folder
+in). Public keeps things simple and free; your bot token is never stored
+in this repo regardless.
 
-### Step B - Create a new repository
+### B. Create a free PythonAnywhere account
 
-1. Click the **+** icon (top right) → **New repository**.
-2. Name it anything, e.g. `news-digest-bot`.
-3. Leave it **Public**. (This makes GitHub Actions completely free and
-   unlimited - see [section 14](#14-known-limitations-of-the-free-setup)
-   for why this is safe even though your bot token stays private
-   regardless.) If you'd strongly prefer Private, that also works, just
-   note the Actions-minutes caveat later in this doc.
-4. Click **Create repository**.
+Go to [pythonanywhere.com](https://www.pythonanywhere.com) → **Pricing &
+signup** → **Create a Beginner account** (free, no credit card).
 
-### Step C - Upload the project files
+### C. Get the code onto PythonAnywhere
 
-The most foolproof way to do this in a browser, with no command line:
+1. On your PythonAnywhere dashboard, open a **Bash console** (Consoles
+   tab → **Bash**).
+2. Run:
+   ```
+   git clone https://github.com/YOUR_USERNAME/YOUR_REPO_NAME.git
+   cd YOUR_REPO_NAME
+   pip3.10 install --user -r requirements.txt
+   ```
+   (If `pip3.10` isn't found, run `python3 --version` to see what's
+   available and use the matching `pip3.x`.)
 
-1. On your new repo's page, click **Add file → Upload files**.
-2. Open the project folder you downloaded on your computer, select
-   **all files and folders inside it**, and drag them into the browser
-   upload area. Modern browsers (Chrome, Edge) preserve the folder
-   structure (`.github/`, `src/`, `data/`) when you drag a folder in.
-3. Scroll down and click **Commit changes**.
-4. Afterwards, open the repository's file list and confirm you can see
-   the `.github`, `src`, and `data` folders, not just loose files. If the
-   folder structure got flattened, delete what was uploaded and instead
-   use **Add file → Create new file**, and for each file, type its full
-   path (e.g. `src/main.py`) into the filename box - GitHub will create
-   the folders automatically. This is slower but always works.
+### D. Create the web app
 
-*(If you're comfortable with git/GitHub Desktop, you can of course just
-`git push` the folder instead - same result.)*
+1. Go to the **Web** tab → **Add a new web app** → **Next**.
+2. Choose **Manual configuration** (not the Flask wizard - we already
+   have our own app).
+3. Pick the Python version matching what you installed packages for.
+4. PythonAnywhere creates your app at `https://YOUR_USERNAME.pythonanywhere.com`.
 
-### Step D - Add your secrets and settings
+### E. Point it at your code and add your credentials
 
-See [section 5](#5-entering-your-telegram-credentials) and
-[section 6](#6-setting-your-timezone) below - do this before your first
-real run.
+1. Still on the **Web** tab, find **WSGI configuration file** and click
+   its path to open it in the editor.
+2. Delete everything in that file and replace it with:
+   ```python
+   import sys
+   import os
 
-### Step E - Confirm Actions is enabled
+   project_home = '/home/YOUR_USERNAME/YOUR_REPO_NAME'
+   if project_home not in sys.path:
+       sys.path.insert(0, project_home)
 
-Go to the **Actions** tab of your repository. If you see a button to
-enable workflows, click it. You should then see a workflow called
-**Daily News Digest** listed.
+   os.environ['TELEGRAM_BOT_TOKEN'] = 'paste-your-real-token-here'
+   os.environ['TELEGRAM_USER_ID'] = 'paste-your-real-user-id-here'
 
-That's it - the bot will now run automatically every hour and send your
-digest during the hour you configured.
+   from webhook_app import app as application
+   ```
+3. Replace `YOUR_USERNAME`, `YOUR_REPO_NAME`, and the two credential
+   values with your real ones. **This file lives only on your
+   PythonAnywhere account, never in GitHub** - this is the one and only
+   place your real token goes.
+4. Save, go back to the **Web** tab, and click the big green **Reload**
+   button.
+5. Visit `https://YOUR_USERNAME.pythonanywhere.com/` in a browser - you
+   should see: *"News digest bot webhook is running."* That confirms
+   deployment worked.
 
-## 5. Entering your Telegram credentials
+### F. Tell Telegram where to send your messages
 
-Your bot token and user ID are secrets. They are **never** put in the
-code - they're stored using GitHub's encrypted Secrets feature, which
-even you can't view again after saving (only the workflow can use them).
+Visit this URL in any browser (replace both placeholders):
 
-1. In your repository, go to **Settings** (top menu of the repo, not
-   your account settings) → **Secrets and variables** → **Actions**.
-2. Make sure you're on the **Secrets** tab.
-3. Click **New repository secret**.
-   - Name: `TELEGRAM_BOT_TOKEN`
-   - Value: the token BotFather gave you (looks like
-     `123456789:AAHk...`)
-   - Click **Add secret**.
-4. Click **New repository secret** again.
-   - Name: `TELEGRAM_USER_ID`
-   - Value: your numeric Telegram user ID
-   - Click **Add secret**.
-
-That's the exact place - `Settings → Secrets and variables → Actions →
-Secrets tab → New repository secret` - for both `TELEGRAM_BOT_TOKEN` and
-`TELEGRAM_USER_ID`.
-
-**One more Telegram-side step:** open a chat with your bot in the
-Telegram app and send it any message (e.g. "hi"), or press **Start**.
-Telegram bots cannot message a user who has never started a
-conversation with them - this is a Telegram rule, not something the code
-can work around.
-
-## 6. Setting your timezone
-
-Timezone and the send-hour are not secret, so they go in **Variables**,
-right next to Secrets:
-
-1. Same page as above: **Settings → Secrets and variables → Actions**.
-2. Click the **Variables** tab this time (not Secrets).
-3. Click **New repository variable**.
-   - Name: `TIMEZONE`
-   - Value: your IANA timezone name, e.g. `America/New_York`,
-     `Europe/Riga`, `Europe/London`, `Asia/Tokyo`, `Australia/Sydney`.
-     Full list:
-     [Wikipedia - List of tz database time zones](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones)
-     (use the value in the "TZ identifier" column).
-   - Click **Add variable**.
-4. (Optional) Click **New repository variable** again if you want a time
-   other than 9 AM:
-   - Name: `DIGEST_HOUR`
-   - Value: an hour from `0` to `23` (24-hour clock, local time). Leave
-     this one out entirely to keep the default of `9`.
-
-If you skip setting `TIMEZONE` altogether, the bot defaults to UTC -
-it will still run, just not necessarily at 9 AM where you are, so it's
-worth setting this.
-
-Daylight saving time is handled automatically - see
-[section 12](#12-how-the-daily-schedule-works).
-
-## 7. Testing before you trust it
-
-Don't wait until tomorrow's 9 AM to find out if it works. Run it by hand:
-
-1. Go to the **Actions** tab → **Daily News Digest** (left sidebar) →
-   **Run workflow** button (top right).
-2. Tick **dry_run** the first time. This builds the whole digest and
-   prints it to the log, but does **not** message you and does **not**
-   mark anything as "sent" - completely safe to run as many times as
-   you like while you're getting things right.
-3. Click **Run workflow**, wait about 10-20 seconds, then click into the
-   run and open the **Run digest bot** step to read the log. You'll see
-   exactly which sources returned articles, how many were scored
-   relevant, and the final ranked list with each story's score and which
-   keywords matched it.
-4. Once that looks right, run it again with **force_run** ticked instead
-   (and dry_run off) to send yourself a real test digest immediately,
-   regardless of the current time or whether one was already sent today.
-
-## 8. Adding or removing keywords
-
-Open `src/config.py` in GitHub (click the file, then the pencil/edit
-icon) and find these three lists near the top:
-
-```python
-HIGH_VALUE_KEYWORDS = [
-    "TikTok", "Instagram", ...
-]
-MEDIUM_VALUE_KEYWORDS = [
-    "algorithm", "ranking", ...
-]
-LOW_VALUE_KEYWORDS = [
-    "ban", "block", ...
-]
+```
+https://api.telegram.org/botYOUR_BOT_TOKEN/setWebhook?url=https://YOUR_USERNAME.pythonanywhere.com/telegram-webhook
 ```
 
-- **To add a keyword:** add it as a new quoted string in whichever list
-  matches how specific/important it is, e.g.
-  `HIGH_VALUE_KEYWORDS = [..., "Midjourney"]`.
-- **To remove one:** delete its entry from the list.
-- Matching is always case-insensitive and works on whole
-  words/phrases (so `"voice-clone"` won't accidentally match inside an
-  unrelated longer word).
-- Multi-word keywords like `"Nano Banana"` work fine as-is.
+You should see `{"ok":true,"result":true,"description":"Webhook was set"}`.
+That's it - Telegram now pushes your messages straight to your bot.
 
-Scroll to the bottom of the file and click **Commit changes**. No other
-file needs to change - keywords take effect on the very next run.
+## 4. Testing
 
-## 9. Adding or removing news sources
+1. Open your bot in Telegram, press **Start** (required once).
+2. Send `/ognews`.
+3. Wait 10-30 seconds (it's actually fetching 6 sites live) - you should
+   get a header message plus your ranked stories.
+4. Send `/ognews` again immediately - you should get *"You can use
+   /ognews again in about 23h 59m"* instead of a second digest. That
+   confirms the cooldown works.
 
-Also in `src/config.py`, find `ALLOWED_SOURCES` near the top. Each source
-looks like this:
+If nothing happens at all, see [Troubleshooting](#9-troubleshooting).
 
-```python
-{
-    "id": "martech",
-    "name": "MarTech",
-    "homepage": "https://martech.org/",
-    "feed_candidates": ["https://martech.org/feed/"],
-    "scraper": "scrape_generic",
-},
-```
+## 5. Adding/removing keywords and sources
 
-- **To remove a source:** delete its whole `{...}` block.
-- **To add a source:** copy an existing block, give it a unique `id`,
-  the display `name` you want shown in Telegram, its `homepage`, and any
-  RSS feed URL you know of in `feed_candidates` (or leave that list
-  empty - `[]` - if you don't know one). Set `"scraper": "scrape_generic"`
-  unless you're comfortable writing a custom parser function in
-  `src/fetchers.py` for a site with an unusual layout.
+Unchanged from before - both live in `src/config.py`:
 
-The bot always tries RSS first and only scrapes the page directly if no
-feed works, so adding a source with just a homepage and an empty
-`feed_candidates` list will usually still work fine via automatic feed
-discovery or the generic scraper.
+- **Keywords**: edit `HIGH_VALUE_KEYWORDS` / `MEDIUM_VALUE_KEYWORDS` /
+  `LOW_VALUE_KEYWORDS` (case-insensitive, whole-word matching).
+- **Sources**: edit the `ALLOWED_SOURCES` list - each entry has an `id`,
+  `name`, `homepage`, optional `feed_candidates`, and a `scraper`.
 
-## 10. How the ranking system works
+After editing in GitHub, remember to **pull the change onto
+PythonAnywhere and reload** - see [section 8](#8-updating-the-code-later).
 
-Every keyword has a weight:
+## 6. Why PythonAnywhere instead of GitHub Actions
 
-| Tier | Weight | Examples |
-|---|---|---|
-| High | 3 | TikTok, Instagram, Sora, Shopify, shadowban, GEO, deminimis |
-| Medium | 2 | algorithm, SEO, ecommerce, tariff, deepfake, ROAS |
-| Low | 1 | free, update, launch, policy, sale, block |
+GitHub Actions is excellent for "run this on a timer," but it has no way
+to listen for an incoming Telegram message in real time - it only wakes
+up on a schedule you define, never in response to something happening
+elsewhere. Making `/ognews` work requires something that's reachable by
+Telegram at any moment: a webhook.
 
-For each article:
+PythonAnywhere's free tier gives you one always-reachable web app with a
+free HTTPS address and no credit card - a good fit since it costs
+nothing and needs no code rewrite (it's still plain Python/Flask, reusing
+every module already built). The one real trade-off: free-tier apps can
+only make outbound requests to an allow-listed set of domains. If one of
+your 6 sites ever returns nothing *specifically* on PythonAnywhere but
+works everywhere else, that's almost certainly why - go to **Account →
+Whitelisted websites** on PythonAnywhere and request it be added (it's a
+quick, free approval for reasonable requests). Every other source keeps
+working independently either way - one blocked domain never breaks the
+rest.
 
-- A keyword match **in the title** counts 2.5x more than a match only in
-  the summary/snippet, since the title is the best signal of what the
-  story is actually about.
-- **A low-value keyword can never qualify an article by itself.** An
-  article needs at least one *high* or *medium* match somewhere before
-  it's considered at all - this is what stops something like "free
-  update" on an unrelated topic from ranking highly, per your
-  requirement.
-- Once an article qualifies, every additional keyword match (including
-  low-value ones) adds to its score, so an article that's clearly about
-  several of your interests at once outranks one that just barely
-  qualifies.
-- A **recency bonus** (worth up to 3 points) is added for articles
-  published in the last 48 hours, fading to zero by the 48-hour mark.
-  Articles older than 48 hours (when a publish date is available) are
-  dropped entirely rather than used as filler.
+## 7. How the ranking and cooldown work
 
-This is a transparent, rule-based system, not an AI model reading each
-article - it's designed to be predictable and free to run. It will
-occasionally miss nuance a human editor wouldn't (see
-[Known limitations](#14-known-limitations-of-the-free-setup)); if you
-find it's consistently over- or under-including a topic, that's a sign
-to adjust that keyword's tier in `config.py`.
+**Ranking** (unchanged from the original design): every keyword has a
+weight - high (3), medium (2), or low (1). A hit in the title counts
+2.5x more than a hit only in the summary. A low-value keyword alone
+(e.g. "free", "update", "launch") can never qualify an article by
+itself - at least one high/medium match is required first. Articles
+older than `LOOKBACK_HOURS` (in `src/config.py`, currently your 1-week
+setting) are dropped rather than used as filler.
 
-## 11. How duplicate detection works
+**Deduplication**: identical or near-identical URLs/titles are merged,
+keeping whichever scored higher.
 
-- Two articles with the same URL (ignoring `http` vs `https`, trailing
-  slashes, and tracking parameters) are always treated as one.
-- Two articles with very similar titles (compared with a standard
-  text-similarity algorithm, not just exact matches) are also treated as
-  duplicates.
-- When a duplicate is found, the bot keeps whichever version it already
-  ranked higher (it sorts by score first, then removes duplicates), so
-  you get the strongest write-up of a story, not just the first one it
-  happened to see.
-- This is title-based, not full-article-based, so two very differently
-  *worded* headlines about the same underlying event (e.g. two outlets
-  covering a TikTok bill with different angles) may both appear - that's
-  intentional, since different angles are often genuinely useful, and
-  matches your instruction to keep both when the coverage adds distinct
-  value.
+**Cooldown**: every successful `/ognews` reply records a timestamp in
+`data/sent_history.json`. The next request checks how much time has
+passed and refuses (politely) until 24 hours have elapsed. Change
+`COOLDOWN_HOURS` in `src/config.py` if you want a different window.
 
-## 12. How the daily schedule works
+## 8. Updating the code later
 
-GitHub Actions' scheduler only understands UTC, and a fixed UTC time
-would silently drift by an hour every spring/fall when your local
-timezone's daylight saving changes - a common failure mode for "free"
-scheduled bots.
+Because there's no more GitHub Actions auto-deploy, changes you make on
+GitHub don't reach the live bot automatically anymore. After editing
+anything in `src/config.py` (or any other file) on GitHub:
 
-To avoid that, the workflow runs **every hour**, and the Python script
-itself checks the current local time in your configured `TIMEZONE` and
-only proceeds past a quick check when it's actually your chosen
-`DIGEST_HOUR`. Every other hourly trigger exits almost instantly without
-fetching anything. This means:
+1. Open a **Bash console** on PythonAnywhere.
+2. Run:
+   ```
+   cd YOUR_REPO_NAME
+   git pull
+   ```
+3. Go to the **Web** tab and click **Reload**.
 
-- 9:00 AM is always 9:00 AM in *your* timezone, automatically, through
-  DST changes, with no manual updates ever needed.
-- A run also checks "did I already send today's digest?" before doing
-  anything else, so even if GitHub's scheduler happens to fire twice
-  near the boundary, you won't get two digests.
-- GitHub doesn't guarantee scheduled workflows fire at the exact minute
-  requested (it can be a few minutes late under load) - because this
-  design checks "is it the right *hour*," not "is it exactly 9:00:00,"
-  a busy scheduler still won't cause you to miss a whole day.
+That's the whole update cycle - about 20 seconds of work each time.
 
-## 13. Troubleshooting
+## 9. Troubleshooting
 
-**I'm not receiving any messages at all**
-- Confirm you pressed **Start** (or sent any message) to your bot in
-  Telegram - bots can't message you first otherwise.
-- Double-check `TELEGRAM_BOT_TOKEN` and `TELEGRAM_USER_ID` are spelled
-  exactly like that (case-sensitive) under **Settings → Secrets and
-  variables → Actions → Secrets**, with no extra spaces.
-- Go to the **Actions** tab and open the most recent **Daily News
-  Digest** run. Open the **Run digest bot** step and read the log - it
-  will tell you plainly if credentials are missing or if Telegram
-  rejected the message (and why).
+**`/ognews` gets no reply at all**
+- Confirm the webhook is actually registered: revisit the `setWebhook`
+  URL from [section 3F](#f-tell-telegram-where-to-send-your-messages) -
+  it should say `"ok":true`.
+- On PythonAnywhere, **Web tab → Error log** - this shows Python
+  exceptions from the app, including missing/incorrect credentials.
+- Confirm you pressed **Start** on the bot at least once.
+- Confirm the app is actually running: visit
+  `https://YOUR_USERNAME.pythonanywhere.com/` directly - if that doesn't
+  load, the deployment itself (not Telegram) is the problem.
 
-**The workflow doesn't seem to run at all**
-- Check the **Actions** tab is enabled (see [Step E](#step-e---confirm-actions-is-enabled)).
-- GitHub automatically pauses scheduled workflows on repositories with
-  no activity for 60 days. Because a successful run commits an update
-  to `data/sent_history.json` roughly once a day, this shouldn't happen
-  on its own - but if you ever see the schedule has stopped, go to
-  **Actions → Daily News Digest** and click **Enable workflow**.
+**It replies "wait 24h" but you never got a first digest**
+- That means `/ognews` genuinely ran once already (check
+  `data/sent_history.json` via the **Files** tab for a
+  `last_command_time` value) - possibly a duplicate Telegram delivery.
+  Harmless; just wait out the cooldown or lower `COOLDOWN_HOURS`
+  temporarily while testing.
 
-**A specific source never contributes any articles**
-- Open a recent run's log and search for that source's `id`. You'll see
-  either "RSS feed OK" or "falling back to scraping," and a count of
-  articles found. If a source consistently returns 0, its page layout
-  likely changed. It won't break the other 5 sources - each one fails
-  independently - but you may want to check whether its RSS feed URL in
-  `src/config.py` still resolves, or update the scraper.
+**One specific source never contributes articles, only on PythonAnywhere**
+- See the allow-list note in [section 6](#6-why-pythonanywhere-instead-of-github-actions).
 
-**I'm getting way too many / too few stories, or the wrong topics**
-- Use `dry_run` (see [section 7](#7-testing-before-you-trust-it)) and
-  read the per-article score + matched-keywords log line for a few runs.
-  Then tune the keyword tiers as described in
-  [section 8](#8-adding-or-removing-keywords).
+**Credentials seem wrong**
+- Re-open the WSGI configuration file (Web tab) and re-paste both values
+  carefully, then Reload. Unlike GitHub Secrets, this file's contents
+  *are* visible to you when you open it (only to you, since it's your
+  private PythonAnywhere account) - useful for double-checking.
 
-**Telegram says "chat not found" or similar**
-- This almost always means `TELEGRAM_USER_ID` is wrong, or you haven't
-  started a chat with the bot yet.
+## 10. Known limitations
 
-## 14. Known limitations of the free setup
-
-- **Public repository = unlimited free Actions minutes.** Private
-  repositories get 2,000 free minutes/month on GitHub's free plan.
-  Running hourly uses roughly 500-800 minutes/month depending on how
-  long each run takes, which fits, but leaves less room for anything
-  else you might add later. If in doubt, keep the repo public - your
-  bot token and user ID stay encrypted and hidden either way; making the
-  repo public only exposes the *code*, not your secrets.
-- **This is a scheduled batch job, not an always-on server.** It can
-  only *send* you messages on schedule; it can't listen for or respond
-  to messages you send the bot (that would need a different, always-on
-  design, which isn't free to host reliably).
-- **Scraping fallbacks are inherently less stable than RSS.** Sites that
-  don't offer RSS may occasionally change their page layout in a way
-  that breaks that one source's scraper. The bot is built to fail
-  gracefully (log it, skip that source, keep going) rather than crash,
-  but you may occasionally need to glance at the logs and nudge a
-  scraper back into shape.
-- **Ranking is a rules-based heuristic, not an AI reading the article.**
-  It's deliberately transparent and free to run, but it can occasionally
-  misjudge context in ways a human (or a paid AI service) wouldn't. Tune
-  keyword tiers over time if you notice a pattern.
-- **GitHub's scheduler is "best effort" on timing** - typically within a
-  few minutes of the hour, occasionally more under heavy load. The
-  hourly-check design (section 12) absorbs this without causing missed
-  or duplicate digests.
-- **A few of your keywords are short, common acronyms** (e.g. `GEO`)
-  that can occasionally appear in unrelated contexts even with
-  whole-word matching. Because low-value/ambiguous hits alone can't
-  qualify an article, this is unlikely to cause false positives on its
-  own, but it's worth knowing about if you ever see a surprising story
-  in your digest.
+- **Free PythonAnywhere outbound requests are allow-listed** - see
+  section 6. Doesn't crash anything; that source just contributes 0
+  articles until whitelisted.
+- **No more automatic daily send.** This is now purely on-demand - if
+  you want a message every day without asking, that's a different design
+  (the earlier scheduled version) and would need re-adding.
+- **Cooldown is a simple 24-hour timer from your last successful use**,
+  not tied to a calendar day - using it at 11 PM means your next use
+  isn't available until 11 PM the next day, not just after midnight.
+- **A slow reply (10-30 seconds) is normal** - it's genuinely fetching 6
+  live websites in that time, not stuck.
+- **Code changes require a manual `git pull` + Reload** on PythonAnywhere
+  - see section 8.

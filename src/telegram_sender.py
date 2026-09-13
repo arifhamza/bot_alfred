@@ -88,17 +88,17 @@ def send_telegram_message(bot_token: str, chat_id: str, text: str) -> bool:
         return False
 
 
-def send_digest(bot_token: str, chat_id: str, articles: list, digest_date_str: str) -> bool:
-    """Sends the full digest, split across multiple messages if needed.
-    Returns True only if every chunk was sent successfully."""
+def send_digest(bot_token: str, chat_id: str, articles: list, generated_at_label: str) -> bool:
+    """Sends the full set of stories, split across multiple messages if
+    needed. Returns True only if every chunk was sent successfully."""
     if not articles:
-        text = f"No new relevant stories for your digest today ({digest_date_str})."
+        text = f"No new relevant stories right now ({generated_at_label})."
         return send_telegram_message(bot_token, chat_id, text)
 
     blocks = format_entries(articles)
     messages = chunk_message(blocks)
 
-    header = f"📰 Daily Digest — {digest_date_str} ({len(articles)} stories)"
+    header = f"🗞 /ognews — {generated_at_label} ({len(articles)} stories)"
     all_ok = send_telegram_message(bot_token, chat_id, header)
 
     for i, message_text in enumerate(messages, start=1):

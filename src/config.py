@@ -181,4 +181,4 @@ TELEGRAM_MESSAGE_LIMIT = 4096   # Telegram's hard cap per message
 SEND_EMPTY_DIGEST_NOTICE = True  # send a short "nothing new today" message
                                   # instead of staying silent when there are
                                   # zero qualifying stories
-DEFAULT_DIGEST_HOUR = 9          # 9 AM local time, overridable via env var
+COOLDOWN_HOURS = 24              # minimum time between /ognews uses

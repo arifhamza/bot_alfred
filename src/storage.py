@@ -1,13 +1,12 @@
 """
 Lightweight JSON-file storage for:
-  - which article URLs have already been sent (so we never repeat one)
-  - the local date the digest was last successfully sent (so an hourly
-    cron trigger never sends the same day's digest twice)
+  - which article URLs have already been sent (so /ognews never repeats one)
+  - when /ognews was last used (so the 24-hour cooldown can be enforced)
 
-The file lives at data/sent_history.json inside the repo. The GitHub
-Actions workflow commits this file back to the repo after every run, so
-history survives between runs even though each run starts on a fresh,
-throwaway virtual machine.
+The file lives at data/sent_history.json next to the webhook app. Unlike
+the earlier scheduled version, this now runs on a single always-on web
+app (PythonAnywhere), so the file just needs to persist on that one
+machine's disk - no git commit-back trick needed.
 """
 
 import json
@@ -18,8 +17,8 @@ from datetime import datetime, timedelta, timezone
 logger = logging.getLogger("digest_bot.storage")
 
 DEFAULT_HISTORY = {
-    "sent_urls": {},     # normalized_url -> ISO date string it was sent
-    "last_sent_date": None,  # e.g. "2026-09-12" in the target timezone
+    "sent_urls": {},           # normalized_url -> ISO date string it was sent
+    "last_command_time": None,  # ISO datetime of the last /ognews use
 }
 
 
@@ -41,7 +40,7 @@ def load_history(path: str) -> dict:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         data.setdefault("sent_urls", {})
-        data.setdefault("last_sent_date", None)
+        data.setdefault("last_command_time", None)
         return data
     except (json.JSONDecodeError, OSError) as exc:
         logger.error("Could not read history file (%s), starting fresh: %s", path, exc)
@@ -64,11 +63,6 @@ def is_already_sent(history: dict, url: str) -> bool:
 def mark_sent(history: dict, urls, sent_date_iso: str) -> None:
     for url in urls:
         history["sent_urls"][_normalize_url(url)] = sent_date_iso
-    history["last_sent_date"] = sent_date_iso
-
-
-def already_sent_today(history: dict, local_date_str: str) -> bool:
-    return history.get("last_sent_date") == local_date_str
 
 
 def prune_old_entries(history: dict, retention_days: int) -> int:
@@ -90,3 +84,22 @@ def prune_old_entries(history: dict, retention_days: int) -> int:
             removed += 1
     history["sent_urls"] = kept
     return removed
+
+
+def seconds_since_last_command(history: dict):
+    """Returns seconds since /ognews was last used, or None if it's never
+    been used (or the stored value can't be parsed)."""
+    ts = history.get("last_command_time")
+    if not ts:
+        return None
+    try:
+        last = datetime.fromisoformat(ts)
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    return (datetime.now(timezone.utc) - last).total_seconds()
+
+
+def mark_command_used(history: dict) -> None:
+    history["last_command_time"] = datetime.now(timezone.utc).isoformat()

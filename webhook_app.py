@@ -91,7 +91,7 @@ def telegram_webhook():
     if text.lower().startswith("/start"):
         send_telegram_message(
             bot_token, chat_id,
-            "Send /ognews any time to get the latest relevant stories.",
+            "Send /ognews any time to get the latest relevant stories",
         )
         return jsonify(ok=True)
 
@@ -104,11 +104,11 @@ def telegram_webhook():
     if ok:
         send_telegram_message(
             bot_token, chat_id,
-            "Of course, Sir. Fetching the news streams now. It should land here in just a minute.",
+            "Of course, sir. Fetching the news streams now. It should land here in just a minute.",
         )
     else:
         logger.error("Failed to trigger GitHub workflow: %s", detail)
-        send_telegram_message(bot_token, chat_id, "Something went wrong starting your digest - check the PythonAnywhere error log.")
+        send_telegram_message(bot_token, chat_id, "Something went wrong starting your digest - check the PythonAnywhere error log")
 
     return jsonify(ok=True)
 

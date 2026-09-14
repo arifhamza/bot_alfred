@@ -1,10 +1,13 @@
 """
 The actual "build a digest and send it" pipeline, shared by:
-  - webhook_app.py   (real usage: triggered by you typing /ognews)
-  - src/main.py        (manual/local testing from your own computer)
+  - src/main.py   (run by the GitHub Actions workflow, and for local testing)
 
-Keeping this in one place means the on-demand command and your local test
-runs can never drift apart in behavior.
+Keeping this in one place means the live bot and your local test runs
+can never drift apart in behavior. There is no cooldown/rate-limit here -
+/ognews can be used as often as you like; the only natural throttle is
+that each run genuinely re-fetches your 6 sites, which takes it a
+moment, and already-sent articles never repeat regardless of how often
+you ask.
 """
 
 import logging
@@ -13,17 +16,6 @@ from datetime import datetime, timezone
 from . import config, dedup, fetchers, scoring, storage, telegram_sender
 
 logger = logging.getLogger("digest_bot.builder")
-
-COOLDOWN_SECONDS = config.COOLDOWN_HOURS * 3600
-
-
-def format_wait_message(seconds_remaining: float) -> str:
-    seconds_remaining = max(0, int(seconds_remaining))
-    hours, remainder = divmod(seconds_remaining, 3600)
-    minutes = remainder // 60
-    if hours > 0:
-        return f"You can use /ognews again in about {hours}h {minutes}m."
-    return f"You can use /ognews again in about {minutes} minute(s)."
 
 
 def fetch_score_dedup(history: dict):
@@ -54,21 +46,15 @@ def fetch_score_dedup(history: dict):
     return final
 
 
-def build_and_send(bot_token: str, chat_id: str, history_path: str, enforce_cooldown: bool = True, dry_run: bool = False):
+def build_and_send(bot_token: str, chat_id: str, history_path: str, dry_run: bool = False):
     """Runs the whole pipeline and sends the result to Telegram.
 
     Returns (status, detail):
-      status == "cooldown" -> detail is the wait message to send the user
       status == "dry_run"  -> detail describes what would have been sent
       status == "sent"     -> detail is a short summary
       status == "error"    -> detail explains what went wrong
     """
     history = storage.load_history(history_path)
-
-    if enforce_cooldown:
-        elapsed = storage.seconds_since_last_command(history)
-        if elapsed is not None and elapsed < COOLDOWN_SECONDS:
-            return "cooldown", format_wait_message(COOLDOWN_SECONDS - elapsed)
 
     final_articles = fetch_score_dedup(history)
 
@@ -87,7 +73,6 @@ def build_and_send(bot_token: str, chat_id: str, history_path: str, enforce_cool
     removed = storage.prune_old_entries(history, config.HISTORY_RETENTION_DAYS)
     if removed:
         logger.info("Pruned %d history entries older than %d days.", removed, config.HISTORY_RETENTION_DAYS)
-    storage.mark_command_used(history)
     storage.save_history(history_path, history)
 
     return "sent", f"{len(final_articles)} stories sent."

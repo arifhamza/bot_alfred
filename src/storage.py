@@ -18,7 +18,6 @@ logger = logging.getLogger("digest_bot.storage")
 
 DEFAULT_HISTORY = {
     "sent_urls": {},           # normalized_url -> ISO date string it was sent
-    "last_command_time": None,  # ISO datetime of the last /ognews use
 }
 
 
@@ -40,7 +39,6 @@ def load_history(path: str) -> dict:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         data.setdefault("sent_urls", {})
-        data.setdefault("last_command_time", None)
         return data
     except (json.JSONDecodeError, OSError) as exc:
         logger.error("Could not read history file (%s), starting fresh: %s", path, exc)
@@ -85,21 +83,3 @@ def prune_old_entries(history: dict, retention_days: int) -> int:
     history["sent_urls"] = kept
     return removed
 
-
-def seconds_since_last_command(history: dict):
-    """Returns seconds since /ognews was last used, or None if it's never
-    been used (or the stored value can't be parsed)."""
-    ts = history.get("last_command_time")
-    if not ts:
-        return None
-    try:
-        last = datetime.fromisoformat(ts)
-        if last.tzinfo is None:
-            last = last.replace(tzinfo=timezone.utc)
-    except ValueError:
-        return None
-    return (datetime.now(timezone.utc) - last).total_seconds()
-
-
-def mark_command_used(history: dict) -> None:
-    history["last_command_time"] = datetime.now(timezone.utc).isoformat()

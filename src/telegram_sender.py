@@ -5,7 +5,7 @@ one HTTP POST per message).
 
 Format (per story):
 
-    1. News Article Title — Source Name
+    1. News Article Title - Source Name
     https://example.com/article
 
 We use Telegram's HTML parse mode rather than Markdown because article
@@ -32,7 +32,7 @@ def _escape(text: str) -> str:
 
 def format_entries(articles: list) -> list:
     """Turns a list of scored/ranked articles into numbered text blocks,
-    e.g. ['1. <b>Title</b> — Source\\nhttps://...', '2. ...']."""
+    e.g. ['1. <b>Title</b> - Source\\nhttps://...', '2. ...']."""
     blocks = []
     for i, article in enumerate(articles, start=1):
         title = _escape(article["title"])
@@ -40,7 +40,7 @@ def format_entries(articles: list) -> list:
         url = article["url"]  # URLs aren't HTML-escaped; Telegram auto-links plain URLs
         header = f"{i}. <b>{title}</b>"
         if source:
-            header += f" — {source}"
+            header += f" - {source}"
         blocks.append(f"{header}\n{url}")
     return blocks
 
@@ -98,7 +98,7 @@ def send_digest(bot_token: str, chat_id: str, articles: list, generated_at_label
     blocks = format_entries(articles)
     messages = chunk_message(blocks)
 
-    header = f"🗞 /ognews — {generated_at_label} ({len(articles)} stories)"
+    header = f"📰 Organic Marketing Insights - {generated_at_label} ({len(articles)} updates)"
     all_ok = send_telegram_message(bot_token, chat_id, header)
 
     for i, message_text in enumerate(messages, start=1):

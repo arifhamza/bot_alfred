@@ -2,258 +2,170 @@
 
 Type `/ognews` to your Telegram bot any time and get the most relevant
 news stories from your 6 chosen sites, ranked and deduplicated. Limited
-to once every 24 hours. No scheduling, no server bills.
+to once every 24 hours.
 
-This version replaced an earlier scheduled-digest design - see
-[section 6](#6-why-pythonanywhere-instead-of-github-actions) for why an
-on-demand command needs different hosting than a daily cron job.
+## Architecture (why two free services, not one)
 
----
+| Piece | What it does | Why it's there |
+|---|---|---|
+| **PythonAnywhere** (`webhook_app.py`) | Listens for your `/ognews` message, enforces the 24h cooldown, and tells GitHub to run the real job | It's the only piece that's always reachable, so Telegram has somewhere to deliver your message to |
+| **GitHub Actions** (`.github/workflows/ognews.yml`) | Actually fetches your 6 sites, scores/ranks/dedupes articles, sends the Telegram messages, and saves history | PythonAnywhere's free tier blocks outbound requests to ordinary websites (only official public APIs are allowed) - GitHub's runners have full internet access, confirmed working in earlier testing |
 
-## Contents
-
-1. [How it works](#1-how-it-works)
-2. [What's in this project](#2-whats-in-this-project)
-3. [Setup: step by step](#3-setup-step-by-step)
-4. [Testing](#4-testing)
-5. [Adding/removing keywords and sources](#5-addingremoving-keywords-and-sources)
-6. [Why PythonAnywhere instead of GitHub Actions](#6-why-pythonanywhere-instead-of-github-actions)
-7. [How the ranking and cooldown work](#7-how-the-ranking-and-cooldown-work)
-8. [Updating the code later](#8-updating-the-code-later)
-9. [Troubleshooting](#9-troubleshooting)
-10. [Known limitations](#10-known-limitations)
+So: **Telegram → PythonAnywhere (gatekeeper) → GitHub Actions (does the work) → Telegram (sends you the result directly)**.
 
 ---
 
-## 1. How it works
-
-1. You type `/ognews` to your bot in Telegram.
-2. Telegram instantly forwards that message to a small always-on web app
-   (`webhook_app.py`) hosted for free on PythonAnywhere.
-3. That app checks: has it been at least 24 hours since you last used
-   `/ognews`? If not, it replies telling you how long to wait, and stops.
-4. If you're clear, it fetches your 6 sites, scores every article against
-   your keywords, drops anything already sent before, removes near-dupes,
-   and sends you up to 25 of the best ones.
-5. It remembers what it sent (in a local file on the PythonAnywhere
-   account) so those same stories never come back.
-
-There is no scheduler and no daily automatic send anymore - it only runs
-when you ask it to.
-
-## 2. What's in this project
+## 1. What's in this project
 
 ```
 telegram-news-digest/
-├── webhook_app.py            <- the live bot: listens for /ognews
-├── data/sent_history.json    <- memory: sent URLs + cooldown timestamp
+├── webhook_app.py                    <- PythonAnywhere: listens for /ognews
+├── .github/workflows/ognews.yml      <- GitHub Actions: does the real work
+├── data/sent_history.json            <- memory: sent URLs (git-committed by Actions)
+├── requirements.txt                  <- full deps, used by GitHub Actions
+├── requirements-webhook.txt          <- light deps (flask+requests), used by PythonAnywhere
 ├── src/
-│   ├── config.py               <- keywords, sources, all settings you'll tweak
-│   ├── digest_builder.py         <- the shared fetch/score/dedup/send pipeline
-│   ├── fetchers.py                 <- downloads articles (RSS + scrapers)
-│   ├── scoring.py                    <- relevance ranking
-│   ├── dedup.py                        <- duplicate detection
-│   ├── telegram_sender.py                <- formats and sends Telegram messages
-│   ├── storage.py                          <- reads/writes the memory file
-│   ├── main.py                               <- optional: manual/local test runner
-│   └── logging_setup.py                        <- logging configuration
-├── requirements.txt          <- the 4 Python packages it needs
+│   ├── config.py             <- keywords, sources, all settings you'll tweak
+│   ├── digest_builder.py       <- the fetch/score/dedup/send pipeline
+│   ├── fetchers.py               <- downloads articles (RSS + scrapers)
+│   ├── scoring.py                  <- relevance ranking
+│   ├── dedup.py                      <- duplicate detection
+│   ├── telegram_sender.py              <- formats and sends Telegram messages
+│   ├── storage.py                        <- reads/writes the memory file
+│   ├── main.py                             <- run by GitHub Actions (and for local testing)
+│   └── logging_setup.py                      <- logging configuration
 └── README.md
 ```
 
-## 3. Setup: step by step
+## 2. Setup: step by step
 
-### A. Get the code into GitHub (skip if you already did this)
+### A. Code is on GitHub, public repo (you've done this)
 
-Same as before - create a free GitHub account, create a public repo, and
-upload this folder (Add file → Upload files, dragging the whole folder
-in). Public keeps things simple and free; your bot token is never stored
-in this repo regardless.
+### B. Add the GitHub Actions workflow's secrets (if not already there)
 
-### B. Create a free PythonAnywhere account
+**Settings → Secrets and variables → Actions → Secrets tab**: confirm
+`TELEGRAM_BOT_TOKEN` and `TELEGRAM_USER_ID` are set (you set these
+earlier - no change needed if so).
 
-Go to [pythonanywhere.com](https://www.pythonanywhere.com) → **Pricing &
-signup** → **Create a Beginner account** (free, no credit card).
+### C. Create a GitHub Personal Access Token (new step)
 
-### C. Get the code onto PythonAnywhere
+This lets PythonAnywhere tell GitHub "run the workflow now."
 
-1. On your PythonAnywhere dashboard, open a **Bash console** (Consoles
-   tab → **Bash**).
-2. Run:
-   ```
-   git clone https://github.com/YOUR_USERNAME/YOUR_REPO_NAME.git
-   cd YOUR_REPO_NAME
-   pip3.10 install --user -r requirements.txt
-   ```
-   (If `pip3.10` isn't found, run `python3 --version` to see what's
-   available and use the matching `pip3.x`.)
+1. Go to **github.com → your profile picture → Settings → Developer
+   settings → Personal access tokens → Fine-grained tokens → Generate
+   new token**.
+2. Name it anything, e.g. `ognews-trigger`.
+3. **Repository access**: select **Only select repositories** → choose
+   your repo.
+4. **Permissions**: expand **Repository permissions** → find **Actions**
+   → set to **Read and write**.
+5. Generate it, and **copy the token immediately** - GitHub only shows it
+   once.
 
-### D. Create the web app
+### D. On PythonAnywhere: pull the new code
 
-1. Go to the **Web** tab → **Add a new web app** → **Next**.
-2. Choose **Manual configuration** (not the Flask wizard - we already
-   have our own app).
-3. Pick the Python version matching what you installed packages for.
-4. PythonAnywhere creates your app at `https://YOUR_USERNAME.pythonanywhere.com`.
-
-### E. Point it at your code and add your credentials
-
-1. Still on the **Web** tab, find **WSGI configuration file** and click
-   its path to open it in the editor.
-2. Delete everything in that file and replace it with:
-   ```python
-   import sys
-   import os
-
-   project_home = '/home/YOUR_USERNAME/YOUR_REPO_NAME'
-   if project_home not in sys.path:
-       sys.path.insert(0, project_home)
-
-   os.environ['TELEGRAM_BOT_TOKEN'] = 'paste-your-real-token-here'
-   os.environ['TELEGRAM_USER_ID'] = 'paste-your-real-user-id-here'
-
-   from webhook_app import app as application
-   ```
-3. Replace `YOUR_USERNAME`, `YOUR_REPO_NAME`, and the two credential
-   values with your real ones. **This file lives only on your
-   PythonAnywhere account, never in GitHub** - this is the one and only
-   place your real token goes.
-4. Save, go back to the **Web** tab, and click the big green **Reload**
-   button.
-5. Visit `https://YOUR_USERNAME.pythonanywhere.com/` in a browser - you
-   should see: *"News digest bot webhook is running."* That confirms
-   deployment worked.
-
-### F. Tell Telegram where to send your messages
-
-Visit this URL in any browser (replace both placeholders):
-
+Bash console:
 ```
-https://api.telegram.org/botYOUR_BOT_TOKEN/setWebhook?url=https://YOUR_USERNAME.pythonanywhere.com/telegram-webhook
+cd ~/telegram_bot_news
+git pull
+pip3.13 install --user -r requirements-webhook.txt
+```
+(use whichever Python version your web app is actually set to)
+
+### E. Update your WSGI configuration file
+
+Add **three new lines** to the file you already have (keep the existing
+`TELEGRAM_BOT_TOKEN` / `TELEGRAM_USER_ID` lines as they are):
+
+```python
+os.environ['GITHUB_TOKEN'] = 'paste-your-fine-grained-token-here'
+os.environ['GITHUB_REPO'] = 'yourusername/telegram_bot_news'
+os.environ['GITHUB_WORKFLOW_FILE'] = 'ognews.yml'
 ```
 
-You should see `{"ok":true,"result":true,"description":"Webhook was set"}`.
-That's it - Telegram now pushes your messages straight to your bot.
+Save, go to the **Web** tab, click **Reload**.
 
-## 4. Testing
+### F. Delete the old scheduled workflow, if it's still there
 
-1. Open your bot in Telegram, press **Start** (required once).
-2. Send `/ognews`.
-3. Wait 10-30 seconds (it's actually fetching 6 sites live) - you should
-   get a header message plus your ranked stories.
-4. Send `/ognews` again immediately - you should get *"You can use
-   /ognews again in about 23h 59m"* instead of a second digest. That
-   confirms the cooldown works.
+If `.github/workflows/daily-digest.yml` still exists in your repo,
+delete it - it's fully replaced by `ognews.yml` now.
 
-If nothing happens at all, see [Troubleshooting](#9-troubleshooting).
+## 3. Testing
 
-## 5. Adding/removing keywords and sources
+1. Visit `https://arifm00.pythonanywhere.com/` - should say *"OG News
+   webhook is running."*
+2. In Telegram, send `/ognews`.
+3. You should immediately get: *"On it - building your digest now..."*
+4. Within about a minute, a second message arrives with your actual
+   stories - that one comes straight from GitHub Actions, not
+   PythonAnywhere.
+5. Send `/ognews` again right away - should reply with the cooldown
+   wait-message instead of triggering another run.
+6. You can also watch it happen live: **GitHub repo → Actions tab** -
+   you'll see an **"OG News Digest"** run start the moment you message
+   the bot.
 
-Unchanged from before - both live in `src/config.py`:
+## 4. Adding/removing keywords and sources
 
-- **Keywords**: edit `HIGH_VALUE_KEYWORDS` / `MEDIUM_VALUE_KEYWORDS` /
-  `LOW_VALUE_KEYWORDS` (case-insensitive, whole-word matching).
-- **Sources**: edit the `ALLOWED_SOURCES` list - each entry has an `id`,
-  `name`, `homepage`, optional `feed_candidates`, and a `scraper`.
+Unchanged - both live in `src/config.py` (`HIGH_VALUE_KEYWORDS` /
+`MEDIUM_VALUE_KEYWORDS` / `LOW_VALUE_KEYWORDS`, and `ALLOWED_SOURCES`).
+After editing on GitHub, no PythonAnywhere update is needed for these -
+GitHub Actions always runs the latest code from your repo automatically.
 
-After editing in GitHub, remember to **pull the change onto
-PythonAnywhere and reload** - see [section 8](#8-updating-the-code-later).
+## 5. How ranking, dedup, and cooldown work
 
-## 6. Why PythonAnywhere instead of GitHub Actions
-
-GitHub Actions is excellent for "run this on a timer," but it has no way
-to listen for an incoming Telegram message in real time - it only wakes
-up on a schedule you define, never in response to something happening
-elsewhere. Making `/ognews` work requires something that's reachable by
-Telegram at any moment: a webhook.
-
-PythonAnywhere's free tier gives you one always-reachable web app with a
-free HTTPS address and no credit card - a good fit since it costs
-nothing and needs no code rewrite (it's still plain Python/Flask, reusing
-every module already built). The one real trade-off: free-tier apps can
-only make outbound requests to an allow-listed set of domains. If one of
-your 6 sites ever returns nothing *specifically* on PythonAnywhere but
-works everywhere else, that's almost certainly why - go to **Account →
-Whitelisted websites** on PythonAnywhere and request it be added (it's a
-quick, free approval for reasonable requests). Every other source keeps
-working independently either way - one blocked domain never breaks the
-rest.
-
-## 7. How the ranking and cooldown work
-
-**Ranking** (unchanged from the original design): every keyword has a
-weight - high (3), medium (2), or low (1). A hit in the title counts
-2.5x more than a hit only in the summary. A low-value keyword alone
-(e.g. "free", "update", "launch") can never qualify an article by
-itself - at least one high/medium match is required first. Articles
-older than `LOOKBACK_HOURS` (in `src/config.py`, currently your 1-week
-setting) are dropped rather than used as filler.
+**Ranking**: every keyword has a weight - high (3), medium (2), low (1).
+A hit in the title counts 2.5x more than one only in the summary. A
+low-value keyword alone can never qualify an article - at least one
+high/medium match is required first. Articles older than
+`LOOKBACK_HOURS` in `src/config.py` are dropped rather than used as
+filler.
 
 **Deduplication**: identical or near-identical URLs/titles are merged,
-keeping whichever scored higher.
+keeping whichever scored higher. This history lives in
+`data/sent_history.json` and is committed back to your repo by GitHub
+Actions after every successful send.
 
-**Cooldown**: every successful `/ognews` reply records a timestamp in
-`data/sent_history.json`. The next request checks how much time has
-passed and refuses (politely) until 24 hours have elapsed. Change
-`COOLDOWN_HOURS` in `src/config.py` if you want a different window.
+**Cooldown**: PythonAnywhere tracks the last trigger time in its own
+small local file and refuses new requests within `COOLDOWN_HOURS` (24 by
+default, set in `src/config.py`) of the last one.
 
-## 8. Updating the code later
+## 6. Troubleshooting
 
-Because there's no more GitHub Actions auto-deploy, changes you make on
-GitHub don't reach the live bot automatically anymore. After editing
-anything in `src/config.py` (or any other file) on GitHub:
+**No "On it..." message at all when you send /ognews**
+- Check `https://arifm00.pythonanywhere.com/` loads.
+- Check PythonAnywhere's **Web tab → error log**.
+- Confirm the webhook is registered (revisit the `setWebhook` URL from
+  earlier - should say `"ok":true`).
 
-1. Open a **Bash console** on PythonAnywhere.
-2. Run:
-   ```
-   cd YOUR_REPO_NAME
-   git pull
-   ```
-3. Go to the **Web** tab and click **Reload**.
+**Got "On it..." but no digest ever arrives**
+- Go to the **Actions** tab on GitHub - did a run actually start? If
+  not, the GitHub API call failed - check the PythonAnywhere error log
+  for a message starting with "Failed to trigger GitHub workflow."
+  Common causes: the fine-grained token wasn't given **Actions: Read and
+  write** permission, `GITHUB_REPO` is misspelled, or the token expired.
+- If a run *did* start but shows a red X, click into it and read the
+  log - same troubleshooting as before (missing secrets, a source
+  failing, etc.).
 
-That's the whole update cycle - about 20 seconds of work each time.
+**"0 relevant stories" every time**
+- This was the PythonAnywhere allow-list problem from before - now that
+  fetching happens in GitHub Actions instead, it shouldn't recur. If it
+  does, check whether the run actually found articles (open the Actions
+  log and look for lines like "Fetched N raw articles").
 
-## 9. Troubleshooting
+## 7. Known limitations
 
-**`/ognews` gets no reply at all**
-- Confirm the webhook is actually registered: revisit the `setWebhook`
-  URL from [section 3F](#f-tell-telegram-where-to-send-your-messages) -
-  it should say `"ok":true`.
-- On PythonAnywhere, **Web tab → Error log** - this shows Python
-  exceptions from the app, including missing/incorrect credentials.
-- Confirm you pressed **Start** on the bot at least once.
-- Confirm the app is actually running: visit
-  `https://YOUR_USERNAME.pythonanywhere.com/` directly - if that doesn't
-  load, the deployment itself (not Telegram) is the problem.
-
-**It replies "wait 24h" but you never got a first digest**
-- That means `/ognews` genuinely ran once already (check
-  `data/sent_history.json` via the **Files** tab for a
-  `last_command_time` value) - possibly a duplicate Telegram delivery.
-  Harmless; just wait out the cooldown or lower `COOLDOWN_HOURS`
-  temporarily while testing.
-
-**One specific source never contributes articles, only on PythonAnywhere**
-- See the allow-list note in [section 6](#6-why-pythonanywhere-instead-of-github-actions).
-
-**Credentials seem wrong**
-- Re-open the WSGI configuration file (Web tab) and re-paste both values
-  carefully, then Reload. Unlike GitHub Secrets, this file's contents
-  *are* visible to you when you open it (only to you, since it's your
-  private PythonAnywhere account) - useful for double-checking.
-
-## 10. Known limitations
-
-- **Free PythonAnywhere outbound requests are allow-listed** - see
-  section 6. Doesn't crash anything; that source just contributes 0
-  articles until whitelisted.
-- **No more automatic daily send.** This is now purely on-demand - if
-  you want a message every day without asking, that's a different design
-  (the earlier scheduled version) and would need re-adding.
-- **Cooldown is a simple 24-hour timer from your last successful use**,
-  not tied to a calendar day - using it at 11 PM means your next use
-  isn't available until 11 PM the next day, not just after midnight.
-- **A slow reply (10-30 seconds) is normal** - it's genuinely fetching 6
-  live websites in that time, not stuck.
-- **Code changes require a manual `git pull` + Reload** on PythonAnywhere
-  - see section 8.
+- **PythonAnywhere free tier can't reach ordinary websites** - this is
+  why the split-architecture exists; don't add fetching logic back into
+  `webhook_app.py` without also either upgrading PythonAnywhere or
+  getting each specific domain allow-listed (unlikely to be approved,
+  since PythonAnywhere only allow-lists official public APIs).
+- **Two systems means two places to check when debugging** - the
+  PythonAnywhere error log (for anything before the digest starts
+  building) and the GitHub Actions log (for anything after).
+- **The Personal Access Token expires** if you set an expiration date
+  when creating it - if `/ognews` suddenly stops triggering GitHub after
+  working fine for a while, check whether the token needs renewing.
+- **Cooldown is a rolling 24 hours from your last use**, not tied to a
+  calendar day.

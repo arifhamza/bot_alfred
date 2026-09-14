@@ -1,0 +1,58 @@
+name: OG News Digest
+
+# Triggered two ways:
+#   1. The "Run workflow" button in the Actions tab (manual testing)
+#   2. An API call from the PythonAnywhere webhook, the instant you send
+#      /ognews to your bot in Telegram - see webhook_app.py
+#
+# This job does all the actual work (fetching your 6 sites, scoring,
+# deduplicating, sending to Telegram) because GitHub Actions runners have
+# full, unrestricted internet access - unlike PythonAnywhere's free tier,
+# which only allows a small allowlist of official APIs and blocks
+# ordinary websites. PythonAnywhere's only job is to listen for your
+# Telegram message and kick this off.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write   # needed so the workflow can commit the updated history file
+
+concurrency:
+  group: ognews-digest
+  cancel-in-progress: false
+
+jobs:
+  send-digest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Build and send digest
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_USER_ID: ${{ secrets.TELEGRAM_USER_ID }}
+        run: python -m src.main
+
+      - name: Commit updated history (if it changed)
+        run: |
+          if ! git diff --quiet -- data/sent_history.json; then
+            git config user.name "ognews-bot"
+            git config user.email "actions@users.noreply.github.com"
+            git add data/sent_history.json
+            git commit -m "Update sent-article history [skip ci]"
+            git push
+          else
+            echo "No history changes to commit."
+          fi
